@@ -1,688 +1,266 @@
-import React, { useMemo, useState, useEffect } from "react";
-import { motion } from "framer-motion";
-import { Copy, Download, Sparkles, Plus, Settings2, Wand2 } from "lucide-react";
+import React, { useState } from 'react';
+import { Copy, RefreshCw, Lightbulb, Zap, Target } from 'lucide-react';
 
-// PromptExpander MVP
-// - Single-file React component
-// - Tailwind CSS for styling
-// - Framer Motion for subtle animations
-// - No backend required; everything happens client-side
-// - Copy/Download buttons for exporting the expanded prompt
-// - Framework presets + modular blocks you can toggle on/off
-//
-// How to use in a blank React app (Vite/Next/CRA):
-// 1) Make sure Tailwind is enabled (https://tailwindcss.com/docs/guides/vite)
-// 2) Drop this component into your project and render <App />
-// 3) Optional: adjust presets/templates below for your org/use-cases
-
-// ---- Types ----
-
-type BlockKey =
-  | "role"
-  | "goal"
-  | "context"
-  | "inputs"
-  | "constraints"
-  | "steps"
-  | "rules"
-  | "format"
-  | "evaluation"
-  | "clarifying"
-  | "guardrails"
-  | "verification"
-  | "references"
-  | "jsonSchema";
-
-interface FrameworkPreset {
-  id: string;
-  name: string;
-  description: string;
-  defaultBlocks: BlockKey[];
-  blockHints?: Partial<Record<BlockKey, string>>;
-}
-
-interface Options {
-  targetModel: "OpenAI" | "Anthropic" | "Local/Other";
-  tone: string;
-  audience: string;
-  length: "short" | "medium" | "long";
-  temperature: number; // just metadata for user awareness
-  includeQuestions: boolean; // alias for clarifying block toggle
-}
-
-// ---- Presets ----
-
-const PRESETS: FrameworkPreset[] = [
-  {
-    id: "rgcsrf",
-    name: "General Task (Role → Goal → Context → Steps → Rules → Format)",
-    description:
-      "Balanced structure for most tasks. Adds role, explicit goal, context, steps, rules, and output format.",
-    defaultBlocks: [
-      "role",
-      "goal",
-      "context",
-      "steps",
-      "rules",
-      "format",
-      "clarifying",
-      "guardrails",
-      "verification",
-    ],
-    blockHints: {
-      role:
-        "You are an expert assistant. Keep internal reasoning private; provide final answers with brief, verifiable rationale only.",
-      rules:
-        "Cite sources when claims depend on external facts. Avoid fabrications. If unsure, say so and ask targeted questions.",
-      verification:
-        "Before finalizing, self-check against constraints & success criteria; list any open assumptions.",
-    },
-  },
-  {
-    id: "coding",
-    name: "Software / Code Generation",
-    description:
-      "Adds I/O specs, edge-cases, tests, style conventions, and a results check.",
-    defaultBlocks: [
-      "role",
-      "goal",
-      "context",
-      "inputs",
-      "constraints",
-      "steps",
-      "rules",
-      "format",
-      "evaluation",
-      "guardrails",
-      "verification",
-      "clarifying",
-    ],
-    blockHints: {
-      role: "You are a senior software engineer and clear technical writer.",
-      constraints:
-        "Respect language version, dependencies, performance limits, security constraints, and platform environment.",
-      evaluation:
-        "Provide minimal test cases and how to run them. Include time/space tradeoffs when relevant.",
-      format:
-        "Deliver code blocks plus a short README-style explanation. If JSON requested, output valid JSON only.",
-    },
-  },
-  {
-    id: "writing",
-    name: "Content Writing / Editorial",
-    description:
-      "Persona, audience, structure, voice, style, SEO toggles, and measurable goals.",
-    defaultBlocks: [
-      "role",
-      "goal",
-      "context",
-      "constraints",
-      "steps",
-      "rules",
-      "format",
-      "evaluation",
-      "clarifying",
-    ],
-    blockHints: {
-      role: "You are a seasoned editor and content strategist.",
-      format:
-        "Return an outline first, then a draft. Use headings, bullets, and a skimmable structure.",
-      evaluation:
-        "Include a brief checklist for tone, reading level, and factual accuracy.",
-    },
-  },
-  {
-    id: "research",
-    name: "Research / Extraction",
-    description:
-      "Source requirements, schema for extraction, citation style, uncertainty handling.",
-    defaultBlocks: [
-      "role",
-      "goal",
-      "context",
-      "constraints",
-      "rules",
-      "format",
-      "references",
-      "guardrails",
-      "verification",
-      "clarifying",
-    ],
-    blockHints: {
-      rules:
-        "Differentiate facts from interpretations. Mark confidence levels. Prefer primary sources.",
-      format:
-        "If structured, output must conform to the provided JSON schema.",
-    },
-  },
-  {
-    id: "education",
-    name: "Education / Instructional Design",
-    description:
-      "Learning objectives, Bloom level, scaffolding, differentiation, rubric.",
-    defaultBlocks: [
-      "role",
-      "goal",
-      "context",
-      "constraints",
-      "steps",
-      "rules",
-      "format",
-      "evaluation",
-      "clarifying",
-      "verification",
-    ],
-    blockHints: {
-      role: "You are an instructional designer and master teacher.",
-      evaluation:
-        "Provide a rubric aligned to objectives and success criteria; include differentiation options.",
-    },
-  },
-];
-
-// ---- Utilities ----
-
-const LS_KEY = "prompt-expander-state-v1";
-
-function saveState(toSave: any) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(toSave));
-  } catch {}
-}
-
-function loadState(): any | null {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function downloadText(filename: string, text: string) {
-  const el = document.createElement("a");
-  el.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
-  el.download = filename;
-  el.click();
-}
-
-function copyToClipboard(text: string) {
-  navigator.clipboard?.writeText(text);
-}
-
-// ---- Component ----
-
-export default function App() {
-  const [basicPrompt, setBasicPrompt] = useState("");
-  const [presetId, setPresetId] = useState(PRESETS[0].id);
-  const [blocks, setBlocks] = useState<Record<BlockKey, boolean>>({
-    role: true,
-    goal: true,
-    context: true,
-    inputs: false,
-    constraints: false,
-    steps: true,
-    rules: true,
-    format: true,
-    evaluation: false,
-    clarifying: true,
-    guardrails: true,
-    verification: true,
-    references: false,
-    jsonSchema: false,
+const PromptEnhancer = () => {
+  const [basicPrompt, setBasicPrompt] = useState('');
+  const [enhancedPrompt, setEnhancedPrompt] = useState('');
+  const [selectedTechniques, setSelectedTechniques] = useState({
+    roleAssignment: true,
+    contextualFraming: true,
+    stepByStep: true,
+    exampleProvision: true,
+    outputStructuring: true,
+    constraintSpecification: true
   });
+  const [isEnhancing, setIsEnhancing] = useState(false);
 
-  const [options, setOptions] = useState<Options>({
-    targetModel: "OpenAI",
-    tone: "clear, concise, non-hype",
-    audience: "general",
-    length: "medium",
-    temperature: 0.2,
-    includeQuestions: true,
-  });
-
-  const [jsonSchema, setJsonSchema] = useState(
-    '{\n  "$schema": "http://json-schema.org/draft-07/schema#",\n  "type": "object",\n  "properties": {\n    "title": {"type": "string"},\n    "summary": {"type": "string"},\n    "key_points": {"type": "array", "items": {"type": "string"}}\n  },\n  "required": ["title", "summary", "key_points"]\n}'
-  );
-
-  // Load from localStorage on first render
-  useEffect(() => {
-    const saved = loadState();
-    if (saved) {
-      setBasicPrompt(saved.basicPrompt ?? "");
-      setPresetId(saved.presetId ?? PRESETS[0].id);
-      setBlocks(saved.blocks ?? blocks);
-      setOptions(saved.options ?? options);
-      setJsonSchema(saved.jsonSchema ?? jsonSchema);
+  const promptTechniques = {
+    roleAssignment: {
+      name: "Role Assignment",
+      description: "Assign a specific role or expertise to the AI",
+      icon: <Target className="w-4 h-4" />
+    },
+    contextualFraming: {
+      name: "Contextual Framing",
+      description: "Provide background context and situational details",
+      icon: <Lightbulb className="w-4 h-4" />
+    },
+    stepByStep: {
+      name: "Step-by-Step Instructions",
+      description: "Break down the task into clear, sequential steps",
+      icon: <Zap className="w-4 h-4" />
+    },
+    exampleProvision: {
+      name: "Example Provision",
+      description: "Include examples of desired input/output format",
+      icon: <Copy className="w-4 h-4" />
+    },
+    outputStructuring: {
+      name: "Output Structuring",
+      description: "Specify desired format and structure of response",
+      icon: <RefreshCw className="w-4 h-4" />
+    },
+    constraintSpecification: {
+      name: "Constraint Specification",
+      description: "Define boundaries, limitations, and requirements",
+      icon: <Target className="w-4 h-4" />
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  };
 
-  // Persist changes
-  useEffect(() => {
-    saveState({ basicPrompt, presetId, blocks, options, jsonSchema });
-  }, [basicPrompt, presetId, blocks, options, jsonSchema]);
-
-  const preset = useMemo(
-    () => PRESETS.find((p) => p.id === presetId) ?? PRESETS[0],
-    [presetId]
-  );
-
-  // When preset changes, load its default blocks
-  useEffect(() => {
-    const initialBlocks: Record<BlockKey, boolean> = {
-      role: false,
-      goal: false,
-      context: false,
-      inputs: false,
-      constraints: false,
-      steps: false,
-      rules: false,
-      format: false,
-      evaluation: false,
-      clarifying: false,
-      guardrails: false,
-      verification: false,
-      references: false,
-      jsonSchema: false,
-    };
-    preset.defaultBlocks.forEach((b) => (initialBlocks[b] = true));
-    setBlocks(initialBlocks);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetId]);
-
-  const expanded = useMemo(() => {
-    const lines: string[] = [];
-
-    // Helper to push sections if enabled
-    const add = (label: string, body: string) => {
-      if (body.trim().length === 0) return;
-      lines.push(`### ${label}\n${body.trim()}\n`);
-    };
-
-    // Header meta (non-model facing notes)
-    lines.push(
-      `# Prompt (auto-structured)\n\n> Target model: ${options.targetModel}\n> Audience: ${options.audience}\n> Tone: ${options.tone}\n> Length: ${options.length}\n> Temperature (hint): ${options.temperature}\n`
-    );
-
-    if (blocks.role) {
-      const hint = preset.blockHints?.role
-        ? `\n${preset.blockHints.role}`
-        : "";
-      add("Role", `You are an expert assistant.${hint}`);
+  const enhancePrompt = async () => {
+    if (!basicPrompt.trim()) return;
+    
+    setIsEnhancing(true);
+    
+    // Simulate processing time
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    let enhanced = "";
+    
+    // Role Assignment
+    if (selectedTechniques.roleAssignment) {
+      const roles = {
+        'write': 'expert writer and editor',
+        'code': 'senior software engineer',
+        'analyze': 'data analyst and researcher',
+        'explain': 'experienced teacher and communicator',
+        'create': 'creative professional',
+        'design': 'UX/UI designer',
+        'plan': 'strategic planner and project manager',
+        'research': 'research specialist',
+        'review': 'expert reviewer and critic'
+      };
+      
+      const detectedRole = Object.keys(roles).find(key => 
+        basicPrompt.toLowerCase().includes(key)
+      ) || 'expert professional';
+      
+      enhanced += `You are an ${roles[detectedRole] || 'expert professional'} with extensive experience in your field. `;
     }
-
-    if (blocks.goal) {
-      add(
-        "Goal",
-        basicPrompt
-          ? `Primary objective: ${basicPrompt}`
-          : "State the objective clearly."
-      );
+    
+    // Contextual Framing
+    if (selectedTechniques.contextualFraming) {
+      enhanced += `\n\nContext: The user is seeking assistance with the following task. Please consider the broader implications and applications of your response. `;
     }
-
-    if (blocks.context) {
-      add(
-        "Context",
-        "Use domain knowledge as needed. Prefer accurate, verifiable information. If information could be outdated, ask to verify."
-      );
+    
+    // Main Task
+    enhanced += `\n\nTask: ${basicPrompt}`;
+    
+    // Step-by-Step Instructions
+    if (selectedTechniques.stepByStep) {
+      enhanced += `\n\nPlease approach this systematically by:
+1. First, analyzing the core requirements
+2. Then, developing your response step by step
+3. Finally, reviewing and refining your output`;
     }
-
-    if (blocks.inputs) {
-      add(
-        "Inputs",
-        "If any input files, APIs, or examples are provided, acknowledge and restate them succinctly."
-      );
+    
+    // Example Provision
+    if (selectedTechniques.exampleProvision) {
+      enhanced += `\n\nFor reference, structure your response similar to how you would approach analogous tasks in your field. If applicable, provide concrete examples to illustrate your points.`;
     }
-
-    if (blocks.constraints) {
-      add(
-        "Constraints",
-        `- Follow platform & security constraints.\n- Stay within token limits; keep output focused.\n- Match the requested style and audience.\n- Avoid revealing chain-of-thought; provide final answers with concise rationale.\n- If uncertain, list assumptions and ask questions.`
-      );
+    
+    // Output Structuring
+    if (selectedTechniques.outputStructuring) {
+      enhanced += `\n\nOutput Requirements:
+- Use clear headings and sections where appropriate
+- Provide actionable insights or recommendations
+- Include relevant details while maintaining clarity
+- Ensure your response is well-organized and easy to follow`;
     }
-
-    if (blocks.steps) {
-      add(
-        "Process",
-        `1) Plan briefly.\n2) Execute the task.\n3) Validate against constraints.\n4) Present results.\n5) Offer next steps or options.`
-      );
+    
+    // Constraint Specification
+    if (selectedTechniques.constraintSpecification) {
+      enhanced += `\n\nConstraints:
+- Maintain accuracy and factual correctness
+- Provide practical, implementable advice
+- Consider potential limitations or challenges
+- Tailor the complexity to the user's apparent needs`;
     }
+    
+    enhanced += `\n\nPlease provide a comprehensive response that addresses all aspects of this request.`;
+    
+    setEnhancedPrompt(enhanced.trim());
+    setIsEnhancing(false);
+  };
 
-    if (blocks.rules) {
-      const hint = preset.blockHints?.rules ? `\n${preset.blockHints.rules}` : "";
-      add(
-        "Rules",
-        `- Be specific and non-hype.${hint}\n- Use plain language.\n- Show units, assumptions, and edge-cases when relevant.`
-      );
+  const copyToClipboard = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      console.error('Failed to copy text: ', err);
     }
+  };
 
-    if (blocks.format) {
-      const hint = preset.blockHints?.format ? `\n${preset.blockHints.format}` : "";
-      add(
-        "Output Format",
-        `Return a clean, skimmable result.${hint}\nWhen JSON is requested, output *only* JSON with no extra commentary.`
-      );
-    }
-
-    if (blocks.evaluation) {
-      add(
-        "Evaluation",
-        preset.blockHints?.evaluation ||
-          "Provide a brief success checklist and minimal test cases or acceptance criteria."
-      );
-    }
-
-    if (blocks.references) {
-      add(
-        "References",
-        "If external facts are used, list sources and their access dates. Mark confidence levels."
-      );
-    }
-
-    if (blocks.guardrails) {
-      add(
-        "Guardrails",
-        "If a request is unsafe, illegal, or violates policies, refuse and suggest safer alternatives."
-      );
-    }
-
-    if (blocks.verification) {
-      const hint = preset.blockHints?.verification
-        ? `\n${preset.blockHints.verification}`
-        : "";
-      add(
-        "Verification",
-        `Before final output, double-check factual claims and formatting.${hint}`
-      );
-    }
-
-    if (blocks.clarifying && options.includeQuestions) {
-      add(
-        "Questions (answer before proceeding if possible)",
-        "1) What are the exact success criteria?\n2) Any must-include constraints or exclusions?\n3) Preferred length and format (e.g., JSON, Markdown)?"
-      );
-    }
-
-    if (blocks.jsonSchema) {
-      add("JSON Schema", `\n\n\u0060\u0060\u0060json\n${jsonSchema}\n\u0060\u0060\u0060`);
-    }
-
-    return lines.join("\n").trim();
-  }, [blocks, jsonSchema, options, preset, basicPrompt]);
-
-  const tokenEstimate = useMemo(() => {
-    // Very rough token estimate (English): ~0.75 tokens/word → words = chars/5
-    const words = expanded.length / 5;
-    const tokens = Math.round(words * 0.75);
-    return tokens;
-  }, [expanded]);
+  const toggleTechnique = (technique) => {
+    setSelectedTechniques(prev => ({
+      ...prev,
+      [technique]: !prev[technique]
+    }));
+  };
 
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900 p-4 sm:p-8">
-      <div className="max-w-6xl mx-auto space-y-6">
-        <header className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-          <div>
-            <h1 className="text-3xl sm:text-4xl font-bold tracking-tight flex items-center gap-2">
-              <Wand2 className="w-8 h-8" /> PromptExpander
-            </h1>
-            <p className="text-neutral-600 mt-1">
-              Turn a short idea into a clear, structured, high-quality prompt.
-            </p>
-          </div>
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-6">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <h1 className="text-4xl font-bold text-gray-800 mb-2">AI Prompt Engineering Tool</h1>
+          <p className="text-lg text-gray-600">Transform basic prompts into powerful, comprehensive instructions</p>
+        </div>
 
-          <motion.div
-            initial={{ opacity: 0, y: -6 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="flex items-center gap-2"
-          >
-            <button
-              onClick={() => copyToClipboard(expanded)}
-              className="px-3 py-2 rounded-2xl bg-black text-white hover:opacity-90 transition flex items-center gap-2 shadow"
-            >
-              <Copy className="w-4 h-4" /> Copy
-            </button>
-            <button
-              onClick={() => downloadText("expanded-prompt.txt", expanded)}
-              className="px-3 py-2 rounded-2xl bg-white text-black border hover:bg-neutral-100 transition flex items-center gap-2 shadow"
-            >
-              <Download className="w-4 h-4" /> Download
-            </button>
-          </motion.div>
-        </header>
-
-        {/* Controls */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left: Inputs */}
-          <motion.div
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="lg:col-span-2 bg-white rounded-3xl p-4 sm:p-6 shadow"
-          >
-            <label className="block text-sm font-medium text-neutral-700 mb-2">
-              Basic prompt (what do you want?)
-            </label>
-            <textarea
-              value={basicPrompt}
-              onChange={(e) => setBasicPrompt(e.target.value)}
-              placeholder="e.g., Summarize this article about photosynthesis for 8th graders."
-              className="w-full rounded-2xl border p-3 h-32 focus:outline-none focus:ring-2 focus:ring-neutral-900"
-            />
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-1">
-                  Framework preset
-                </label>
-                <select
-                  value={presetId}
-                  onChange={(e) => setPresetId(e.target.value)}
-                  className="w-full rounded-xl border p-2"
-                >
-                  {PRESETS.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-neutral-500 mt-1">{preset.description}</p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-sm font-medium text-neutral-700 mb-1">
-                    Target model
-                  </label>
-                  <select
-                    value={options.targetModel}
-                    onChange={(e) =>
-                      setOptions((o) => ({ ...o, targetModel: e.target.value as Options["targetModel"] }))
-                    }
-                    className="w-full rounded-xl border p-2"
-                  >
-                    <option>OpenAI</option>
-                    <option>Anthropic</option>
-                    <option>Local/Other</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-neutral-700 mb-1">
-                    Length
-                  </label>
-                  <select
-                    value={options.length}
-                    onChange={(e) =>
-                      setOptions((o) => ({ ...o, length: e.target.value as Options["length"] }))
-                    }
-                    className="w-full rounded-xl border p-2"
-                  >
-                    <option value="short">short</option>
-                    <option value="medium">medium</option>
-                    <option value="long">long</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-1">
-                  Audience
-                </label>
-                <input
-                  value={options.audience}
-                  onChange={(e) => setOptions((o) => ({ ...o, audience: e.target.value }))}
-                  className="w-full rounded-xl border p-2"
-                  placeholder="e.g., executives, 8th graders, developers"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-1">
-                  Tone
-                </label>
-                <input
-                  value={options.tone}
-                  onChange={(e) => setOptions((o) => ({ ...o, tone: e.target.value }))}
-                  className="w-full rounded-xl border p-2"
-                  placeholder="e.g., plain, neutral, persuasive"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-neutral-700 mb-1">
-                  Temperature (hint)
-                </label>
-                <input
-                  type="number"
-                  min={0}
-                  max={1}
-                  step={0.1}
-                  value={options.temperature}
-                  onChange={(e) => setOptions((o) => ({ ...o, temperature: parseFloat(e.target.value) }))}
-                  className="w-full rounded-xl border p-2"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 mt-6">
-                <input
-                  id="includeQuestions"
-                  type="checkbox"
-                  checked={options.includeQuestions}
-                  onChange={(e) => setOptions((o) => ({ ...o, includeQuestions: e.target.checked }))}
-                />
-                <label htmlFor="includeQuestions" className="text-sm text-neutral-700">
-                  Ask clarifying questions first
-                </label>
-              </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Input Section */}
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h2 className="text-2xl font-semibold text-gray-800 mb-4 flex items-center">
+                <Lightbulb className="w-6 h-6 mr-2 text-blue-500" />
+                Basic Prompt
+              </h2>
+              <textarea
+                value={basicPrompt}
+                onChange={(e) => setBasicPrompt(e.target.value)}
+                placeholder="Enter your basic prompt here... (e.g., 'Write a blog post about AI')"
+                className="w-full h-32 p-4 border border-gray-300 rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
             </div>
 
-            {/* Blocks toggles */}
-            <div className="mt-6">
-              <div className="flex items-center gap-2 mb-2">
-                <Settings2 className="w-4 h-4" />
-                <h3 className="font-semibold">Included sections</h3>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-                {(
-                  [
-                    ["role", "Role"],
-                    ["goal", "Goal"],
-                    ["context", "Context"],
-                    ["inputs", "Inputs"],
-                    ["constraints", "Constraints"],
-                    ["steps", "Process"],
-                    ["rules", "Rules"],
-                    ["format", "Output Format"],
-                    ["evaluation", "Evaluation"],
-                    ["clarifying", "Questions"],
-                    ["guardrails", "Guardrails"],
-                    ["verification", "Verification"],
-                    ["references", "References"],
-                    ["jsonSchema", "JSON Schema"],
-                  ] as [BlockKey, string][]
-                ).map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => setBlocks((b) => ({ ...b, [key]: !b[key] }))}
-                    className={
-                      "text-sm px-3 py-2 rounded-2xl border shadow-sm flex items-center justify-between " +
-                      (blocks[key]
-                        ? "bg-black text-white"
-                        : "bg-white text-black hover:bg-neutral-100")
-                    }
-                  >
-                    <span>{label}</span>
-                    {blocks[key] ? <Sparkles className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
-                  </button>
+            {/* Technique Selection */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h3 className="text-xl font-semibold text-gray-800 mb-4">Enhancement Techniques</h3>
+              <div className="space-y-3">
+                {Object.entries(promptTechniques).map(([key, technique]) => (
+                  <label key={key} className="flex items-start cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={selectedTechniques[key]}
+                      onChange={() => toggleTechnique(key)}
+                      className="mt-1 mr-3 rounded"
+                    />
+                    <div className="flex-1">
+                      <div className="flex items-center mb-1">
+                        {technique.icon}
+                        <span className="ml-2 font-medium text-gray-700 group-hover:text-blue-600">
+                          {technique.name}
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-500">{technique.description}</p>
+                    </div>
+                  </label>
                 ))}
               </div>
             </div>
-          </motion.div>
 
-          {/* Right: Preview */}
-          <motion.aside
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-3xl p-4 sm:p-6 shadow"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold">Preview</h3>
-              <span className="text-xs text-neutral-500">≈ {tokenEstimate} tokens</span>
+            <button
+              onClick={enhancePrompt}
+              disabled={!basicPrompt.trim() || isEnhancing}
+              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-gray-400 disabled:to-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-all duration-300 shadow-lg hover:shadow-xl"
+            >
+              {isEnhancing ? (
+                <div className="flex items-center justify-center">
+                  <RefreshCw className="w-5 h-5 mr-2 animate-spin" />
+                  Enhancing...
+                </div>
+              ) : (
+                <div className="flex items-center justify-center">
+                  <Zap className="w-5 h-5 mr-2" />
+                  Enhance Prompt
+                </div>
+              )}
+            </button>
+          </div>
+
+          {/* Output Section */}
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-2xl font-semibold text-gray-800 flex items-center">
+                  <Target className="w-6 h-6 mr-2 text-green-500" />
+                  Enhanced Prompt
+                </h2>
+                {enhancedPrompt && (
+                  <button
+                    onClick={() => copyToClipboard(enhancedPrompt)}
+                    className="flex items-center px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors"
+                  >
+                    <Copy className="w-4 h-4 mr-1" />
+                    Copy
+                  </button>
+                )}
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4 min-h-96">
+                {enhancedPrompt ? (
+                  <pre className="whitespace-pre-wrap text-sm text-gray-700 font-mono leading-relaxed">
+                    {enhancedPrompt}
+                  </pre>
+                ) : (
+                  <div className="flex items-center justify-center h-full text-gray-400">
+                    <div className="text-center">
+                      <Target className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                      <p>Your enhanced prompt will appear here</p>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="border rounded-2xl p-3 h-[540px] overflow-auto whitespace-pre-wrap text-sm">
-              {expanded}
-            </div>
-          </motion.aside>
-        </div>
 
-        {/* Examples */}
-        <motion.section
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-white rounded-3xl p-4 sm:p-6 shadow"
-        >
-          <h3 className="font-semibold mb-3">Quick examples</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-            <div className="p-3 rounded-2xl border">
-              <p className="font-medium">Input (basic):</p>
-              <p className="text-neutral-700 mt-1">
-                "Summarize this article about photosynthesis for 8th graders."
-              </p>
-              <p className="font-medium mt-2">Output (snippet):</p>
-              <pre className="mt-1 whitespace-pre-wrap">
-{`# Prompt (auto-structured)
-
-### Role
-You are an expert biology tutor. Keep internal reasoning private; provide final answers with brief, verifiable rationale only.
-
-### Goal
-Primary objective: Summarize the attached article on photosynthesis for 8th graders.
-
-### Output Format
-Return a 3-paragraph summary at a Grade 8 reading level, plus 5 quiz questions (answer key hidden).`}
-              </pre>
-            </div>
-            <div className="p-3 rounded-2xl border">
-              <p className="font-medium">Input (basic):</p>
-              <p className="text-neutral-700 mt-1">
-                "Write a Python script that fetches weather for a city."
-              </p>
-              <p className="font-medium mt-2">Output (snippet):</p>
-              <pre className="mt-1 whitespace-pre-wrap">
-{`### Constraints
-- Use Python 3.11.
-- No external paid APIs; standard library or free endpoints only.
-
-### Evaluation
-Provide 3 unit tests and a README snippet explaining setup and usage.`}
-              </pre>
+            {/* Tips Section */}
+            <div className="bg-gradient-to-r from-green-50 to-blue-50 rounded-xl p-6 border border-green-200">
+              <h3 className="text-lg font-semibold text-gray-800 mb-3 flex items-center">
+                <Lightbulb className="w-5 h-5 mr-2 text-green-600" />
+                Prompt Engineering Tips
+              </h3>
+              <ul className="space-y-2 text-sm text-gray-700">
+                <li>• <strong>Be specific:</strong> Clear, detailed instructions yield better results</li>
+                <li>• <strong>Provide context:</strong> Help the AI understand the situation and requirements</li>
+                <li>• <strong>Use examples:</strong> Show the AI what good output looks like</li>
+                <li>• <strong>Structure requests:</strong> Break complex tasks into manageable steps</li>
+                <li>• <strong>Set constraints:</strong> Define boundaries and quality standards</li>
+              </ul>
             </div>
           </div>
-        </motion.section>
-
-        <footer className="text-xs text-neutral-500 text-center py-4">
-          Built as an MVP. Extend by adding presets, toggles, and model-specific adapters.
-        </footer>
+        </div>
       </div>
     </div>
   );
-}
+};
+
+export default PromptEnhancer;
