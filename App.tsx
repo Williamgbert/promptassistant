@@ -4,12 +4,28 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [expanded, setExpanded] = useState("");
 
-  const handleExpand = () => {
-    // Simple mock expansion for MVP (replace with API call later)
-    if (prompt.trim() === "") {
-      setExpanded("⚠️ Please enter a prompt first.");
-      return;
-    }
+const handleExpand = async () => {
+  if (prompt.trim() === "") {
+    setExpanded("⚠️ Please enter a prompt first.");
+    return;
+  }
+
+  try {
+    setExpanded("⏳ Expanding your idea...");
+    const response = await fetch("/api/expand", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+
+    const data = await response.json();
+    setExpanded(data.expanded || "⚠️ No expansion returned.");
+  } catch (err) {
+    console.error(err);
+    setExpanded("⚠️ Something went wrong. Try again.");
+  }
+};
+
 
     setExpanded(
       `Here’s a more detailed version of your idea:\n\n"${prompt}" could be built as an interactive app that features:\n- Core functionality (MVP)\n- Expanded functionality (optional add-ons)\n- Testing and iteration phases`
